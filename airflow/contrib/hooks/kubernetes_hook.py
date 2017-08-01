@@ -66,6 +66,60 @@ class KubernetesHook(BaseHook):
 
         return [get_env(name, definition) for name, definition in env.items()]
 
+    def get_env_from_definitions(self, env_from):
+        def get_env_from(definition):
+            configmap = definition.get('configMap')
+            secret = definition.get('secret')
+            prefix = definition.get('prefix')
+
+            return client.V1EnvFromSource(
+                config_map_ref=client.V1ConfigMapEnvSource(name=configmap) if configmap else None,
+                secret_ref=client.V1SecretEnvSource(name=secret) if secret else None,
+                prefix=prefix
+            )
+        return [get_env_from(definition) for definition in env_from]
+
+    def get_volume_definitions(self, volumes):
+        def get_volume(name, definition):
+            if definition['type'] == 'emptyDir':
+                volume = client.V1Volume(
+                    name=name,
+                    empty_dir=client.V1EmptyDirVolumeSource()
+                )
+                volume_mount = client.V1VolumeMount(
+                    mount_path=definition['mountPath'],
+                    name=name
+                )
+            elif definition['type'] == 'hostPath':
+                volume = client.V1Volume(
+                    name=name,
+                    host_path=client.V1HostPathVolumeSource(
+                        path=definition['path']
+                    )
+                )
+                volume_mount = client.V1VolumeMount(
+                    mount_path=definition['mountPath'],
+                    name=name
+                )
+            elif definition['type'] == 'secret':
+                volume = client.V1Volume(
+                    name=name,
+                    secret=client.V1SecretVolumeSource(
+                        secret_name=definition['secret']
+                    )
+                )
+                volume_mount = client.V1VolumeMount(
+                    mount_path=definition['mountPath'],
+                    name=name
+                )
+            else:
+               raise AirflowException('Volume source %s not yet implemented', definition['type'])
+
+            return (volume, volume_mount)
+
+        [volume_defs, volume_mount_defs] = zip(*[get_volume(name, definition) for name, definition in volumes.items()])
+        return (list(volume_defs),list(volume_mount_defs))
+
     """
         Builds pod definition based on supplied arguments
     """
@@ -78,8 +132,13 @@ class KubernetesHook(BaseHook):
             command=None,
             args=None,
             env=None,
+            env_from=None,
+            volumes=None,
             labels=None):
         env_defs = self.get_env_definitions(env) if env else None
+        env_from_defs = self.get_env_from_definitions(env_from) if env_from else None
+        volume_defs, volume_mount_defs = self.get_volume_definitions(volumes) if volumes else (None, None)
+
         return client.V1Pod(
             api_version="v1",
             kind="Pod",
@@ -95,8 +154,11 @@ class KubernetesHook(BaseHook):
                     command=command,
                     args=args,
                     image=image,
-                    env=env_defs
-                )]
+                    env=env_defs,
+                    env_from=env_from_defs,
+                    volume_mounts=volume_mount_defs
+                )],
+                volumes=volume_defs
             )
         )
 

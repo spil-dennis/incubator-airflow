@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+import re
 
 from time import sleep, time
 from random import randint
@@ -71,9 +72,9 @@ class KubernetesPodOperator(BaseOperator):
     @apply_defaults
     def __init__(
             self,
-            namespace,
             image,
-            name="",
+            name=None,
+            namespace="default",
             command=None,
             op_args=None,
             wait=True,
@@ -81,6 +82,8 @@ class KubernetesPodOperator(BaseOperator):
             cleanup="Always",
             labels=None,
             env=None,
+            env_from=None,
+            volumes=None,
             conn_id="k8s_default",
             poke_interval=3,
             *args, **kwargs):
@@ -95,6 +98,8 @@ class KubernetesPodOperator(BaseOperator):
         self.cleanup = cleanup if self.wait else "Never"
         self.labels = labels
         self.env = env
+        self.env_from = env_from
+        self.volumes = volumes
         self.poke_interval = poke_interval
         self.conn_id = conn_id
 
@@ -102,7 +107,7 @@ class KubernetesPodOperator(BaseOperator):
         return KubernetesHook(self.conn_id)
 
     def _base_name(self, context):
-        if len(self.name):
+        if self.name is not None:
             return self.name
 
         base_name = "%s-%s" % (context['ti'].dag_id, context['ti'].task_id)
@@ -143,6 +148,8 @@ class KubernetesPodOperator(BaseOperator):
             command=self.command,
             args=self.op_args,
             env=self.env,
+            env_from=self.env_from,
+            volumes=self.volumes,
             labels=self.labels)
 
         logging.info("Creating pod %s in namespace %s with following definition: %s",
