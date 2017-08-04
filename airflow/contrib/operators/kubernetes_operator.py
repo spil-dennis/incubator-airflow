@@ -65,6 +65,9 @@ class KubernetesPodOperator(BaseOperator):
     :type conn_id: string
     :param poke_interval: Interval between checking the status in seconds
     :type poke_interval: integer
+    :param wait_timeout: Time in seconds to wait for the pod to reach running state.
+    :type wait_timeout: integer
+
     """
     template_fields = ('name', 'command', 'op_args', 'namespace', 'env')
     ui_color = '#f0ede4'
@@ -86,6 +89,7 @@ class KubernetesPodOperator(BaseOperator):
             volumes=None,
             conn_id="k8s_default",
             poke_interval=3,
+            wait_timeout=60,
             *args, **kwargs):
         super(KubernetesPodOperator, self).__init__(*args, **kwargs)
         self.image = image
@@ -101,6 +105,7 @@ class KubernetesPodOperator(BaseOperator):
         self.env_from = env_from
         self.volumes = volumes
         self.poke_interval = poke_interval
+        self.wait_timeout = wait_timeout
         self.conn_id = conn_id
 
     def _create_hook(self):
@@ -158,12 +163,16 @@ class KubernetesPodOperator(BaseOperator):
         logging.debug("Pod definition: %s", pod.spec)
 
         hook.create_pod(pod)
+        max_wait=time() + self.wait_timeout
 
         try:
-            hook.relay_pod_events(pod)
+            hook.relay_pod_events(pod, timeout=self.wait_timeout)
 
             status = None
             while hook.get_pod_state(pod) == 'Pending':
+                if time() > max_wait:
+                    raise AirflowException("Timeout while waiting for pod to reach Running state.")
+
                 sleep(self.poke_interval)
 
             if self.wait:
