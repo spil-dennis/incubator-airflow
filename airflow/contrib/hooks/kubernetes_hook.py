@@ -14,6 +14,7 @@
 
 import logging
 import requests
+import json
 
 from airflow.exceptions import AirflowException
 from airflow.hooks.base_hook import BaseHook
@@ -199,9 +200,18 @@ class KubernetesHook(BaseHook):
             name = pod.metadata.name
             namespace = pod.metadata.namespace
 
-        if not self._stream_log(name, namespace):
-            self._api_log(name, namespace)
+        logging.info("Start container log")
+        logging.info("-------------------")
 
+        if not self._stream_log(name, namespace):
+            self._client_log(name, namespace)
+
+
+    def _get_authorization(self):
+        if client.configuration.api_key['authorization'] is not None:
+            return {'Authorization':client.configuration.api_key['authorization']}
+        else:
+            return None
 
     """
         Stream logs for pod.
@@ -212,39 +222,109 @@ class KubernetesHook(BaseHook):
         (Which is enough if running the worker in kubernetes)
     """
     def _stream_log(self, name, namespace):
-        if client.configuration.api_key['authorization'] is not None:
-            headers = {'Authorization':client.configuration.api_key['authorization']}
-        else:
-            return None
+        headers = self._get_authorization()
+        if not headers:
+            return False
 
-        r = requests.get("%s/api/v1/namespaces/%s/pods/%s/log" %
-                            (client.configuration.host, namespace, name),
-                         params={'follow':'true'},
-                         verify=client.configuration.ssl_ca_cert,
-                         headers=headers,
-                         stream=True)
+        try:
+            with requests.get("%s/api/v1/namespaces/%s/pods/%s/log" %
+                                (client.configuration.host, namespace, name),
+                             params={'follow':'true'},
+                             verify=client.configuration.ssl_ca_cert,
+                             headers=headers,
+                             stream=True) as r:
 
-        if r.encoding is None:
-            r.encoding = 'utf-8'
+                if r.encoding is None:
+                    r.encoding = 'utf-8'
 
-        for line in r.iter_lines(decode_unicode=True):
-            if not line:
-                continue
-
-            logging.info(line.strip())
+                for line in r.iter_lines(decode_unicode=True):
+                    logging.info(line.strip())
+        except Exception as e:
+            logging.info("Streaming container log terminated unexpectedly: %s", e)
+            return False
 
         return True
 
     """
         Fetch log from k8s client.
-        read_namespaced_pod_log with follow=True, only returns once the log is closed.
+        read_namespaced_pod_log with follow=True, only returns once the log is
+        closed.
     """
-    def _api_log(self, name, namespace):
-        log = self.get_conn().read_namespaced_pod_log(
-                        name,
-                        namespace,
-                        follow=True)
+    def _client_log(self, name, namespace):
+        try:
+            log = self.get_conn().read_namespaced_pod_log(
+                            name,
+                            namespace,
+                            follow=True)
 
-        log_lines = log.rstrip().split("\n")
-        for line in log_lines:
-            logging.info(line.rstrip())
+            log_lines = log.rstrip().split("\n")
+            for line in log_lines:
+                logging.info(line.rstrip())
+        except Exception as e:
+            logging.info("Container log from client terminated unexpectedly: %s", e)
+
+
+    """
+        Stream kubernetes events for the pod into logging.info
+
+        Watches the events for the specified pod, until either an event with
+        reason "Started" is encountered, or a timeout is reached. Some events
+         might be missed as the api does not necessarily return
+        events in order, however this should not be a real problem as the value
+        of these are diagnosing startup problems.
+    """
+
+    def relay_pod_events(self, pod=None, name=None, namespace=None, timeout=60):
+        if pod:
+            name = pod.metadata.name
+            namespace = pod.metadata.namespace
+
+        headers = self._get_authorization()
+        if not headers:
+            return False
+
+        params = {
+            'fieldSelector': 'involvedObject.name=%s' % name,
+            'watch': 'true',
+            'timeoutSeconds': timeout
+        }
+
+        url = "%s/api/v1/namespaces/%s/events/" % (
+                client.configuration.host,
+                namespace
+        )
+
+        logging.info("Start pod event log")
+
+        try:
+            with requests.get(url,
+                             params=params,
+                             verify=client.configuration.ssl_ca_cert,
+                             headers=headers,
+                             stream=True) as r:
+
+                if r.encoding is None:
+                    r.encoding = 'utf-8'
+
+                for line in r.iter_lines(decode_unicode=True):
+                    data = json.loads(line)
+
+                    ob = data['object']
+
+                    logging.info("event: %s (component: %s, host: %s, reason: %s)",
+                            ob.get('message'),
+                            ob.get('source', {}).get('component'),
+                            ob.get('source', {}).get('host'),
+                            ob.get('reason'),
+                    )
+
+                    if ob.get('reason') == "Started":
+                        break
+
+
+        except Exception as e:
+            logging.info("Streaming events terminated unexpectedly: %s", e)
+            return False
+
+        return True
+

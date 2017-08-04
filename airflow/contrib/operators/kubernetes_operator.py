@@ -152,12 +152,16 @@ class KubernetesPodOperator(BaseOperator):
             volumes=self.volumes,
             labels=self.labels)
 
-        logging.info("Creating pod %s in namespace %s with following definition: %s",
-                pod_name, self.namespace, pod.spec)
+        logging.info("Creating pod %s in namespace %s",
+                pod_name, self.namespace)
+
+        logging.debug("Pod definition: %s", pod.spec)
 
         hook.create_pod(pod)
 
         try:
+            hook.relay_pod_events(pod)
+
             status = None
             while hook.get_pod_state(pod) == 'Pending':
                 sleep(self.poke_interval)
